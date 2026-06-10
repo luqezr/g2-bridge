@@ -8,7 +8,7 @@ Companion plugin for the [Obsidian on G2](https://github.com/luqezr/obsidian-on-
 2. Enable community plugins if needed.
 3. Browse → search **Even G2 Bridge** → Install → Enable.
 
-Or install manually: copy `main.js`, `manifest.json`, `styles.css`, and `versions.json` into `.obsidian/plugins/evenrealities-g2-bridge/`.
+Or install manually: copy `main.js`, `manifest.json`, `styles.css`, and `versions.json` into `.obsidian/plugins/evenrealities-glasses-bridge/`.
 
 ## One-time setup on phone
 
@@ -42,6 +42,6 @@ The plugin uses Node's `http` module (same pattern as desktop HTTP helper plugin
 
 ## Community Plugins submission
 
-- `manifest.json` — id `evenrealities-g2-bridge`, min Obsidian 1.5.0
+- `manifest.json` — id `evenrealities-glasses-bridge`, min Obsidian 1.5.0
 - Build artifact: `main.js`
 - Listing: describe localhost bridge for Even G2 glasses app

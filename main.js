@@ -329,9 +329,9 @@ var ObsidianOnG2BridgePlugin = class extends import_obsidian.Plugin {
     this.server = createBridgeServer(this.app, this);
     try {
       await this.server.start();
-      console.log("[obsidian-on-g2-bridge] listening on http://127.0.0.1:27124");
+      console.log("[evenrealities-glasses-bridge] listening on http://127.0.0.1:27124");
     } catch (error) {
-      console.error("[obsidian-on-g2-bridge] failed to start localhost server:", error);
+      console.error("[evenrealities-glasses-bridge] failed to start localhost server:", error);
     }
   }
   async onunload() {
