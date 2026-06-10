@@ -1,0 +1,14 @@
+{
+  "name": "obsidian-on-g2-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "esbuild main.ts --bundle --platform=node --target=es2018 --outfile=main.js --external:obsidian --external:electron"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "1.7.2",
+    "typescript": "^5.7.2"
+  }
+}
