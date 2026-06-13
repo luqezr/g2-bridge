@@ -1,17 +1,23 @@
-export const PLUGIN_PORT = 27124
+export const DEFAULT_PLUGIN_PORT = 27124
+/** @deprecated Use DEFAULT_PLUGIN_PORT */
+export const PLUGIN_PORT = DEFAULT_PLUGIN_PORT
 export const PLUGIN_HOST = '127.0.0.1'
 export const CLIENT_HEADER = 'X-Obsidian-On-G2-Client'
 export const CLIENT_ID = 'com.luqezr.obsidianong2'
+export const PASSWORD_HEADER = 'X-Obsidian-On-G2-Password'
 export const PLUGIN_VERSION = '0.1.0'
 
 export const CORS_HEADERS: Record<string, string> = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
-  'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Obsidian-On-G2-Client',
+  'Access-Control-Allow-Headers':
+    'Authorization, Content-Type, X-Obsidian-On-G2-Client, X-Obsidian-On-G2-Password',
 }
 
 export interface PluginData {
   token?: string
+  port?: number
+  password?: string
 }
 
 export interface NoteRef {
@@ -141,13 +147,64 @@ function readBearerToken(request: Request): string | null {
   return header.slice('Bearer '.length).trim() || null
 }
 
+function readPassword(request: Request): string {
+  return request.headers.get(PASSWORD_HEADER)?.trim() ?? ''
+}
+
+function secureEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let result = 0
+  for (let i = 0; i < a.length; i++) {
+    result |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+  return result === 0
+}
+
+function passwordNotConfigured(): Response {
+  return jsonResponse(503, {
+    error: 'Bridge password not configured. Set a password in Obsidian plugin settings.',
+  })
+}
+
 export interface BridgeServerContext {
   getToken(): string | null
   setToken(token: string): Promise<void>
+  clearToken(): void
+  isPasswordConfigured(): boolean
+  verifyPassword(password: string): boolean
   getVaultName(): string
   listNotes(): Promise<NoteRef[]>
   readNote(path: string): Promise<string>
   resolveLink(target: string, fromPath: string): Promise<string | null>
+}
+
+interface TokenStore {
+  get(): string | null
+  set(token: string): Promise<void>
+  clear(): void
+}
+
+function createTokenStore(
+  plugin: import('obsidian').Plugin,
+  getPassword: () => string,
+): TokenStore {
+  let sessionToken: string | null = (plugin.loadData() as PluginData | null)?.token ?? null
+
+  return {
+    get() {
+      return sessionToken
+    },
+    async set(token: string) {
+      sessionToken = token
+      const data = ((plugin.loadData() as PluginData | null) ?? {}) as PluginData
+      data.token = token
+      data.password = getPassword()
+      await plugin.saveData(data)
+    },
+    clear() {
+      sessionToken = null
+    },
+  }
 }
 
 export async function handleBridgeRequest(
@@ -170,18 +227,45 @@ export async function handleBridgeRequest(
   const pathname = url.pathname
 
   if (pathname === '/v1/health') {
-    const token = readBearerToken(request)
-    if (token && token !== ctx.getToken()) {
-      return unauthorized()
+    if (!ctx.isPasswordConfigured()) {
+      return passwordNotConfigured()
     }
-    return jsonResponse(200, {
-      ok: true,
-      vaultName: ctx.getVaultName(),
-      pluginVersion: PLUGIN_VERSION,
-    })
+
+    const bearer = readBearerToken(request)
+    const password = readPassword(request)
+
+    if (bearer) {
+      if (bearer !== ctx.getToken()) {
+        return unauthorized()
+      }
+      return jsonResponse(200, {
+        ok: true,
+        vaultName: ctx.getVaultName(),
+        pluginVersion: PLUGIN_VERSION,
+      })
+    }
+
+    if (password && ctx.verifyPassword(password)) {
+      return jsonResponse(200, {
+        ok: true,
+        vaultName: ctx.getVaultName(),
+        pluginVersion: PLUGIN_VERSION,
+      })
+    }
+
+    return unauthorized()
   }
 
   if (pathname === '/v1/handshake') {
+    if (!ctx.isPasswordConfigured()) {
+      return passwordNotConfigured()
+    }
+
+    const password = readPassword(request)
+    if (!ctx.verifyPassword(password)) {
+      return unauthorized()
+    }
+
     let token = ctx.getToken()
     if (!token) {
       token = randomToken()
@@ -221,7 +305,12 @@ export async function handleBridgeRequest(
   return jsonResponse(404, { error: 'Not found' })
 }
 
-export function createBridgeContext(app: import('obsidian').App, plugin: import('obsidian').Plugin): BridgeServerContext {
+export function createBridgeContext(
+  app: import('obsidian').App,
+  plugin: import('obsidian').Plugin,
+  getPassword: () => string,
+  tokenStore: TokenStore,
+): BridgeServerContext {
   let cachedIndex: NoteRef[] | null = null
 
   async function buildIndex(): Promise<NoteRef[]> {
@@ -254,13 +343,21 @@ export function createBridgeContext(app: import('obsidian').App, plugin: import(
 
   return {
     getToken() {
-      const data = plugin.loadData() as PluginData | null
-      return data?.token ?? null
+      return tokenStore.get()
     },
     async setToken(token: string) {
-      const data = ((plugin.loadData() as PluginData | null) ?? {}) as PluginData
-      data.token = token
-      await plugin.saveData(data)
+      await tokenStore.set(token)
+    },
+    clearToken() {
+      tokenStore.clear()
+    },
+    isPasswordConfigured() {
+      return Boolean(getPassword().length)
+    },
+    verifyPassword(password: string) {
+      const expected = getPassword()
+      if (!expected) return false
+      return secureEqual(password, expected)
     },
     getVaultName() {
       return app.vault.getName()
@@ -304,61 +401,146 @@ export function createBridgeContext(app: import('obsidian').App, plugin: import(
   }
 }
 
+export interface BridgeServerStatus {
+  running: boolean
+  port: number
+  host: string
+  lastClientAt: number | null
+  clientRequestCount: number
+  error: string | null
+}
+
+export function formatClientStatus(status: BridgeServerStatus): string {
+  if (!status.lastClientAt) {
+    return 'No G2 app connected yet. Open the Obsidian on G2 app and tap Test connection or Connect.'
+  }
+
+  const agoSec = Math.floor((Date.now() - status.lastClientAt) / 1000)
+  const requests = `${status.clientRequestCount} request${status.clientRequestCount === 1 ? '' : 's'} total`
+
+  if (agoSec < 60) {
+    return `G2 app active ${agoSec === 0 ? 'just now' : `${agoSec}s ago`} (${requests})`
+  }
+  if (agoSec < 3600) {
+    return `Last G2 app request ${Math.floor(agoSec / 60)}m ago (${requests})`
+  }
+  return `Last G2 app request ${Math.floor(agoSec / 3600)}h ago (${requests})`
+}
+
+export function isClientRecentlyActive(status: BridgeServerStatus, withinMs = 5 * 60 * 1000): boolean {
+  return status.lastClientAt !== null && Date.now() - status.lastClientAt < withinMs
+}
+
+export interface BridgeServerOptions {
+  port?: number
+  onClientActivity?: () => void
+  getPassword?: () => string
+}
+
 export interface BridgeServer {
   start(): Promise<void>
   stop(): Promise<void>
+  getStatus(): BridgeServerStatus
+  clearSessionToken(): void
 }
 
 export function createBridgeServer(
   app: import('obsidian').App,
   plugin: import('obsidian').Plugin,
+  options: BridgeServerOptions = {},
 ): BridgeServer {
-  const ctx = createBridgeContext(app, plugin)
+  const getPassword = options.getPassword ?? (() => '')
+  const tokenStore = createTokenStore(plugin, getPassword)
+  const ctx = createBridgeContext(app, plugin, getPassword, tokenStore)
+  const port = options.port ?? DEFAULT_PLUGIN_PORT
+  const host = PLUGIN_HOST
   let activeServer: import('http').Server | null = null
 
+  const status: BridgeServerStatus = {
+    running: false,
+    port,
+    host,
+    lastClientAt: null,
+    clientRequestCount: 0,
+    error: null,
+  }
+
+  function recordClientActivity(): void {
+    status.lastClientAt = Date.now()
+    status.clientRequestCount++
+    options.onClientActivity?.()
+  }
+
   return {
+    getStatus() {
+      return { ...status }
+    },
+    clearSessionToken() {
+      tokenStore.clear()
+    },
     async start() {
       if (activeServer) return
 
-      const http = require('http') as typeof import('http')
-      activeServer = http.createServer(async (req, res) => {
-        try {
-          const host = req.headers.host ?? `${PLUGIN_HOST}:${PLUGIN_PORT}`
-          const url = `http://${host}${req.url ?? '/'}`
-          const headers = new Headers()
-          for (const [key, value] of Object.entries(req.headers)) {
-            if (typeof value === 'string') headers.set(key, value)
-            else if (Array.isArray(value)) headers.set(key, value.join(', '))
-          }
+      status.port = port
+      status.error = null
+      status.running = false
 
-          const request = new Request(url, { method: req.method, headers })
-          const response = await handleBridgeRequest(request, ctx)
-
-          res.statusCode = response.status
-          response.headers.forEach((value, key) => {
-            res.setHeader(key, value)
-          })
-          const body = await response.text()
-          res.end(body)
-        } catch (error) {
-          res.statusCode = 500
-          res.setHeader('Content-Type', 'application/json; charset=utf-8')
-          for (const [key, value] of Object.entries(CORS_HEADERS)) {
-            res.setHeader(key, value)
-          }
-          res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Internal error' }))
+      try {
+        const http = require('http') as typeof import('http') | undefined
+        if (!http?.createServer) {
+          throw new Error('Node.js HTTP is not available on this device (http.createServer missing).')
         }
-      })
+        activeServer = http.createServer(async (req, res) => {
+          try {
+            const clientHeader = req.headers[CLIENT_HEADER.toLowerCase()]
+            if (clientHeader === CLIENT_ID) {
+              recordClientActivity()
+            }
 
-      await new Promise<void>((resolve, reject) => {
-        activeServer!.listen(PLUGIN_PORT, PLUGIN_HOST, () => resolve())
-        activeServer!.on('error', reject)
-      })
+            const hostHeader = req.headers.host ?? `${host}:${port}`
+            const url = `http://${hostHeader}${req.url ?? '/'}`
+            const headers = new Headers()
+            for (const [key, value] of Object.entries(req.headers)) {
+              if (typeof value === 'string') headers.set(key, value)
+              else if (Array.isArray(value)) headers.set(key, value.join(', '))
+            }
+
+            const request = new Request(url, { method: req.method, headers })
+            const response = await handleBridgeRequest(request, ctx)
+
+            res.statusCode = response.status
+            response.headers.forEach((value, key) => {
+              res.setHeader(key, value)
+            })
+            const body = await response.text()
+            res.end(body)
+          } catch (error) {
+            res.statusCode = 500
+            res.setHeader('Content-Type', 'application/json; charset=utf-8')
+            for (const [key, value] of Object.entries(CORS_HEADERS)) {
+              res.setHeader(key, value)
+            }
+            res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'Internal error' }))
+          }
+        })
+
+        await new Promise<void>((resolve, reject) => {
+          activeServer!.listen(port, host, () => resolve())
+          activeServer!.on('error', reject)
+        })
+        status.running = true
+      } catch (error) {
+        status.running = false
+        status.error = error instanceof Error ? error.message : String(error)
+        activeServer = null
+        throw error
+      }
     },
     async stop() {
       if (!activeServer) return
       const server = activeServer
       activeServer = null
+      status.running = false
       await new Promise<void>((resolve, reject) => {
         server.close(error => (error ? reject(error) : resolve()))
       })

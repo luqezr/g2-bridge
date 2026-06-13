@@ -38,7 +38,17 @@ Produces `main.js` for Community Plugins submission.
 
 ## Mobile note
 
-The plugin uses Node's `http` module (same pattern as desktop HTTP helper plugins). Validate on your Obsidian Android/iOS version — if the server fails to start, check Obsidian's developer console and report an issue.
+The plugin uses Node's `http` module to listen on `127.0.0.1`. **Obsidian on iPhone/iPad does not provide Node.js**, so the bridge cannot run there (`http.createServer` is unavailable).
+
+| Platform | Plugin bridge |
+|----------|----------------|
+| Desktop (Windows/macOS/Linux) | Supported |
+| Obsidian Android | May work (device-dependent) |
+| Obsidian iOS | **Not supported** |
+
+The G2 app connects to `http://127.0.0.1:27124` on **the same device** as Obsidian. On iPhone, use another vault source in the G2 app if available, or run Obsidian on Android/desktop with the G2 app on that same device.
+
+If the server fails to start on other platforms, check Obsidian's developer console and report an issue.
 
 ## Community Plugins submission
 
